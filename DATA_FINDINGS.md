@@ -1,6 +1,6 @@
 # Data Findings
 
-Results of `dispatch.audit` on `ie7200_Mon.json`.
+Results of `dispatch.audit` on the CSVs in `data/csv/`.
 
 | # | Check | Finding | Impact / handling |
 |---|---|---|---|
