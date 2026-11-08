@@ -5,7 +5,7 @@ Vehicle routing / dispatch for the IE7200 Monday instance.
 ## Layout
 | Path | Purpose |
 |---|---|
-| `data/` | `ie7200_Mon.json`, `csv/*.csv` |
+| `data/csv/` | Monday instance CSVs (`ie7200_Mon_*.csv`) |
 | `src/dispatch/params.py` | `Params`, `VehicleType` dataclasses |
 | `src/dispatch/data.py` | Ingestion -> `Instance` |
 | `src/dispatch/audit.py` | Data property checks |

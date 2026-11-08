@@ -1,1 +1,1 @@
-"""Ingestion: raw JSON/CSV -> Instance object."""
+"""Ingestion: data/csv/*.csv -> Instance object."""
