@@ -15,6 +15,7 @@ from dispatch.data import Instance
 from dispatch.params import VehicleType
 
 
+# frozen=True: a measured route cannot be edited afterwards, so the numbers stay trustworthy.
 @dataclass(frozen=True)
 class RouteMetrics:
     """Everything measured about one route, plus slack on the four limits.
@@ -35,18 +36,19 @@ class RouteMetrics:
         slack_span_min: max_span_min - span_min (min).
     """
 
-    miles_total: float
-    miles_interstop: float
-    drive_min: float
-    unload_min: float
-    duty_min: float
-    span_min: float
-    volume_ft3: float
-    slack_volume_ft3: float
-    slack_drive_min: float
-    slack_duty_min: float
-    slack_span_min: float
+    miles_total: float  # miles driven including both depot legs
+    miles_interstop: float  # miles between stops only
+    drive_min: float  # minutes at the wheel
+    unload_min: float  # minutes unloading, paid per order
+    duty_min: float  # drive + unload
+    span_min: float  # first delivery to last, depot legs excluded
+    volume_ft3: float  # cargo on board
+    slack_volume_ft3: float  # room left in the van
+    slack_drive_min: float  # room left under the drive limit
+    slack_duty_min: float  # room left under the duty limit
+    slack_span_min: float  # room left under the span limit
 
+    # @property: use it like a field (m.feasible), without brackets.
     @property
     def feasible(self) -> bool:
         """True if all four slacks are >= 0.
@@ -56,6 +58,7 @@ class RouteMetrics:
         e.g. -1e-13 and be reported infeasible; the raw slacks make this visible.
         """
         return (
+            # All four limits must have room left (slack >= 0); one failure means infeasible.
             self.slack_volume_ft3 >= 0
             and self.slack_drive_min >= 0
             and self.slack_duty_min >= 0
@@ -75,7 +78,7 @@ def _check_inputs(
     Output:
         None. Raises ValueError describing the first problem found.
     """
-    depot = instance.depot_index
+    depot = instance.depot_index  # location number of the depot
     # The depot is added automatically at both ends; inside the sequence it
     # would mean a mid-route return, which the model does not allow.
     if depot in sequence:
@@ -135,8 +138,8 @@ def route_metrics(
         Unload is paid per ORDER on this route, never per location.
     """
     _check_inputs(sequence, orders_on_route, instance)
-    p = instance.params
-    d = instance.dist_mi
+    p = instance.params  # the limits and rates (660 / 840 / 600, minutes per mile)
+    d = instance.dist_mi  # distance matrix: d[i, j] = miles from i to j
     depot = instance.depot_index
 
     # --- Distance --------------------------------------------------------
@@ -158,17 +161,19 @@ def route_metrics(
         miles_interstop = 0.0
 
     # --- Load and unload (per order) -------------------------------------
+    # Look up each order's volume in the orders table by its OrderIndex.
     volumes = instance.orders.loc[list(orders_on_route), "Volume_ft3"]
-    volume_ft3 = float(volumes.sum())
+    volume_ft3 = float(volumes.sum())  # total cargo for the capacity check
     # Floor applied to EACH order, then summed (never to the combined volume).
     unload_min = float(sum(vehicle.unload_time_min(v) for v in volumes))
 
     # --- Times -------------------------------------------------------------
-    drive_min = float(miles_total) * p.drive_min_per_mile
-    duty_min = drive_min + unload_min
+    drive_min = float(miles_total) * p.drive_min_per_mile  # miles x minutes-per-mile (from the parameters, not typed in)
+    duty_min = drive_min + unload_min  # working time = driving + unloading
     # Span = from first delivery to end of last: inter-stop driving + unloading.
     span_min = float(miles_interstop) * p.drive_min_per_mile + unload_min
 
+    # Pack every number into one frozen result. Slack = limit minus usage.
     return RouteMetrics(
         miles_total=float(miles_total),
         miles_interstop=float(miles_interstop),

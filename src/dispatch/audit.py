@@ -17,9 +17,10 @@ from dispatch.data import Instance
 from dispatch.params import VAN_NAME
 
 # Status labels used by one_visit_checks. Labels, not model parameters.
-OK, WARN, FAIL = "OK", "WARN", "FAIL"
+OK, WARN, FAIL = "OK", "WARN", "FAIL"  # three possible verdicts of a check
 
 
+# frozen=True: a finding cannot be edited after it is made.
 @dataclass(frozen=True)
 class Finding:
     """One result of a "one visit per location" check.
@@ -60,7 +61,7 @@ def triangle_violations(inst: Instance) -> pd.DataFrame:
         Because the matrix is symmetric, (j, i, k) is the same case and is
         not listed twice (that is why i < j).
     """
-    d = inst.dist_mi
+    d = inst.dist_mi  # d[i, j] = miles from location i to j (a numpy matrix)
     # via[i, k, j] = d[i, k] + d[k, j]: every two-leg trip, built by broadcasting.
     #   d[:, :, None] has shape (n, n, 1) -> d[i, k] repeated along j
     #   d[None, :, :] has shape (1, n, n) -> d[k, j] repeated along i
@@ -69,13 +70,14 @@ def triangle_violations(inst: Instance) -> pd.DataFrame:
     direct = d[:, None, :]
     # Positive excess = direct leg is longer than going through k = a violation.
     # Distances are whole miles, so strict ">" needs no tolerance.
-    i, k, j = np.nonzero(direct > via)
+    i, k, j = np.nonzero(direct > via)  # nonzero returns the positions where the test is True
     # Keep each unordered pair once (i < j). k equal to i or j can never be a
     # violation (d[i,i] = 0, so the "detour" equals the direct leg), but we
     # filter explicitly so the rule "three different locations" is visible.
-    keep = (i < j) & (k != i) & (k != j)
+    keep = (i < j) & (k != i) & (k != j)  # True/False per case; & means 'and', element by element
     i, j, k = i[keep], j[keep], k[keep]
 
+    # One table row per violation; each column is a list of equal length.
     table = pd.DataFrame({
         "i": i,
         "j": j,
@@ -108,11 +110,11 @@ def violation_location_counts(violations: pd.DataFrame) -> pd.DataFrame:
         Sorted by total, largest first.
     """
     # Stack the i and j columns into one series and count each location.
-    endpoint = pd.concat([violations["i"], violations["j"]]).value_counts()
+    endpoint = pd.concat([violations["i"], violations["j"]]).value_counts()  # value_counts = how many times each location number appears
     shortcut = violations["k"].value_counts()
     # Align both counts on location number; locations missing from one get 0.
     counts = pd.DataFrame({"as_endpoint": endpoint, "as_shortcut": shortcut})
-    counts = counts.fillna(0).astype(int)
+    counts = counts.fillna(0).astype(int)  # a location missing from one column gets 0, then whole numbers
     counts["total"] = counts["as_endpoint"] + counts["as_shortcut"]
     counts.index.name = "LocationIndex"
     return counts.sort_values(["total"], ascending=False, kind="stable")
@@ -141,12 +143,14 @@ def location_profile(inst: Instance, vehicle_name: str = VAN_NAME) -> pd.DataFra
             unload_slack_min      max_span_min - total_unload_min
         A negative slack means the limit is exceeded.
     """
-    p = inst.params
-    vehicle = p.vehicle(vehicle_name)
+    p = inst.params  # limits and rates
+    vehicle = p.vehicle(vehicle_name)  # the van's capacity and unload rule
     d = inst.dist_mi
     depot = inst.depot_index
 
+    # Collect one dict per stop; they become a table at the end.
     rows = []
+    # inst.stops = the 34 customer locations (depot excluded).
     for s in inst.stops:
         # Order indices delivered at this stop, then their volumes.
         order_ids = list(inst.orders_at[s])
@@ -168,7 +172,7 @@ def location_profile(inst: Instance, vehicle_name: str = VAN_NAME) -> pd.DataFra
             "total_unload_min": unload_min,
             "unload_slack_min": p.max_span_min - unload_min,
         })
-    return pd.DataFrame(rows).set_index("LocationIndex")
+    return pd.DataFrame(rows).set_index("LocationIndex")  # make LocationIndex the row label
 
 
 # --- 3. Single-stop feasibility ---------------------------------------------
@@ -198,9 +202,9 @@ def single_stop_feasibility(inst: Instance, vehicle_name: str = VAN_NAME) -> pd.
     """
     p = inst.params
     vehicle = p.vehicle(vehicle_name)
-    prof = location_profile(inst, vehicle_name)
+    prof = location_profile(inst, vehicle_name)  # reuse the per-stop numbers from check 2
 
-    duty_min = prof["round_trip_drive_min"] + prof["total_unload_min"]
+    duty_min = prof["round_trip_drive_min"] + prof["total_unload_min"]  # duty = round-trip driving + unloading
     table = pd.DataFrame({
         "volume_slack_ft3": prof["volume_slack_ft3"],
         "drive_slack_min": prof["drive_slack_min"],
@@ -216,8 +220,8 @@ def single_stop_feasibility(inst: Instance, vehicle_name: str = VAN_NAME) -> pd.
         "duty_slack_min": p.max_duty_min,
         "span_slack_min": p.max_span_min,
     }
-    relative = pd.DataFrame({col: table[col] / lim for col, lim in limits.items()})
-    table["feasible"] = (table[list(limits)] >= 0).all(axis=1)
+    relative = pd.DataFrame({col: table[col] / lim for col, lim in limits.items()})  # slack / limit = share of each limit still free
+    table["feasible"] = (table[list(limits)] >= 0).all(axis=1)  # all(axis=1): True only if every slack in the row is >= 0
     # idxmin(axis=1) gives, per row, the column name with the smallest value.
     table["binding"] = relative.idxmin(axis=1)
     return table
@@ -246,13 +250,13 @@ def one_visit_checks(
           f. mixed vehicle eligibility       -> WARN (M2 only): one vehicle type
                                                 cannot serve all orders at the stop
     """
-    findings: list[Finding] = []
+    findings: list[Finding] = []  # results are collected here, one Finding per check
     feas = single_stop_feasibility(inst, vehicle_name)
     d = inst.dist_mi
     depot = inst.depot_index
 
     # (a) A stop whose orders exceed one vehicle would need two visits.
-    over = feas.index[feas["volume_slack_ft3"] < 0].tolist()
+    over = feas.index[feas["volume_slack_ft3"] < 0].tolist()  # stops whose volume slack is negative
     findings.append(Finding(
         "a. stop volume <= capacity",
         FAIL if over else OK,
@@ -275,8 +279,8 @@ def one_visit_checks(
     n = len(d)
     # np.triu_indices(n, 1) lists every pair (a, b) with a < b exactly once.
     a_idx, b_idx = np.triu_indices(n, 1)
-    zero_pairs = [(int(a), int(b)) for a, b in zip(a_idx, b_idx) if d[a, b] == 0]
-    dup_ids = inst.locations["GlobalLocationId"].duplicated(keep=False)
+    zero_pairs = [(int(a), int(b)) for a, b in zip(a_idx, b_idx) if d[a, b] == 0]  # pairs of locations 0 miles apart
+    dup_ids = inst.locations["GlobalLocationId"].duplicated(keep=False)  # duplicated(keep=False) marks every copy of a repeated id
     dup_locs = inst.locations.index[dup_ids].tolist()
     findings.append(Finding(
         "c. no duplicate locations",
@@ -287,7 +291,7 @@ def one_visit_checks(
     ))
 
     # (d) Shortcuts through a STOP: a route might want to pass through it again.
-    via_stop = violations[violations["k"] != depot]
+    via_stop = violations[violations["k"] != depot]  # keep shortcuts that go through a customer stop (not the depot)
     findings.append(Finding(
         "d. no shortcuts through stops",
         WARN if len(via_stop) else OK,
@@ -312,7 +316,7 @@ def one_visit_checks(
     ))
 
     # (f) Orders at one stop that need different vehicle types (matters in M2).
-    kinds = inst.orders.groupby("LocationIndex")["RequiresStraightTruck"].nunique()
+    kinds = inst.orders.groupby("LocationIndex")["RequiresStraightTruck"].nunique()  # nunique = how many different eligibility values a stop has
     mixed = kinds.index[kinds > 1].tolist()
     findings.append(Finding(
         "f. one vehicle type per stop (M2)",
@@ -321,4 +325,5 @@ def one_visit_checks(
         "(ignored in M1; in M2 these may need two visits)"
         if mixed else "every stop's orders share eligibility",
     ))
+    # One Finding per check (a) to (f); the caller prints or stores them.
     return findings

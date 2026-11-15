@@ -13,6 +13,7 @@ from dispatch.route import route_metrics
 DATA_DIR = Path(__file__).resolve().parent.parent / "data" / "csv"
 
 
+# A fixture builds a value once; tests receive it by naming it as an argument.
 @pytest.fixture(scope="module")
 def inst():
     """The loaded Monday instance."""
@@ -27,6 +28,7 @@ def van(inst):
 
 def all_orders(inst, sequence):
     """Every order at the given locations (helper for whole-stop routes)."""
+    # orders_at maps a location to its order numbers; this gathers them for every stop.
     return [o for s in sequence for o in inst.orders_at[s]]
 
 
@@ -60,6 +62,7 @@ def test_hand_computed_two_stop_route(inst, van):
 # --- edge cases ------------------------------------------------------------
 
 def test_empty_route_is_all_zero_and_feasible(inst, van):
+    # A van that never leaves drives nothing, unloads nothing and breaks no limit.
     m = route_metrics([], [], inst, van)
     assert m.miles_total == 0 and m.drive_min == 0 and m.unload_min == 0
     assert m.span_min == 0 and m.volume_ft3 == 0
@@ -69,6 +72,7 @@ def test_empty_route_is_all_zero_and_feasible(inst, van):
 
 def test_single_stop_far_location(inst, van):
     # Location 14: 201 mi each way; orders 26 (160 ft3) and 42 (165 ft3).
+    # Each number below is worked out by hand in the comment beside it.
     m = route_metrics([14], all_orders(inst, [14]), inst, van)
     assert m.miles_total == 402              # 201 + 201
     assert m.miles_interstop == 0            # one stop: no inter-stop leg
@@ -81,6 +85,7 @@ def test_single_stop_far_location(inst, van):
 
 def test_multiple_orders_at_one_stop_unload_per_order(inst, van):
     # Location 7: order 3 (1676 ft3 -> 50.28) + order 41 (120 ft3 -> 30).
+    # Unload time is paid per order: 50.28 + 30 = 80.28, not one rate on 1,796 ft3 (53.88).
     m = route_metrics([7], [3, 41], inst, van)
     assert m.unload_min == pytest.approx(80.28)
     assert m.unload_min != pytest.approx(van.unload_time_min(1796))  # not 53.88
@@ -89,6 +94,7 @@ def test_multiple_orders_at_one_stop_unload_per_order(inst, van):
 
 def test_split_stop_across_two_routes(inst, van):
     # Location 7's two orders on two different vans.
+    # Splitting a location's orders across two vans must not lose or double-count anything.
     first = route_metrics([7], [41], inst, van)
     second = route_metrics([7], [3], inst, van)
     assert first.unload_min == pytest.approx(30)
@@ -103,6 +109,7 @@ def test_split_stop_across_two_routes(inst, van):
 
 def test_reversed_sequence_gives_same_metrics(inst, van):
     seq = [4, 7, 12]
+    # Driving the same stops backwards costs the same, because the matrix is symmetric.
     forward = route_metrics(seq, all_orders(inst, seq), inst, van)
     backward = route_metrics(seq[::-1], all_orders(inst, seq), inst, van)
     assert forward == backward   # symmetric matrix -> identical route
@@ -110,6 +117,7 @@ def test_reversed_sequence_gives_same_metrics(inst, van):
 
 def test_visit_order_changes_span(inst, van):
     d = inst.dist_mi
+    # Same stops, same unloading, different visit order: only the inter-stop miles (and span) change.
     a = route_metrics([3, 13, 25], all_orders(inst, [3, 13, 25]), inst, van)
     b = route_metrics([13, 3, 25], all_orders(inst, [3, 13, 25]), inst, van)
     assert a.miles_interstop == d[3, 13] + d[13, 25]    # 227
@@ -120,12 +128,14 @@ def test_visit_order_changes_span(inst, van):
 
 def test_non_metric_leg_charged_as_given(inst, van):
     # d(25,32) = 98 mi although 25 -> 21 -> 32 is only 84 mi.
+    # The matrix is not metric: a direct leg longer than a detour is still charged as given.
     m = route_metrics([25, 32], all_orders(inst, [25, 32]), inst, van)
     assert m.miles_interstop == 98
 
 
 def test_infeasible_route_reports_negative_slack(inst, van):
     # 0 -> 14 -> 13 -> 0 = 201 + 211 + 71 = 483 mi -> 724.5 min > 660.
+    # A too-long route must show a NEGATIVE slack and report not feasible.
     m = route_metrics([14, 13], all_orders(inst, [14, 13]), inst, van)
     assert m.miles_total == 483
     assert m.slack_drive_min == pytest.approx(-64.5)
@@ -135,6 +145,7 @@ def test_infeasible_route_reports_negative_slack(inst, van):
 def test_metrics_are_internally_consistent(inst, van):
     seq = [4, 7, 12]
     m = route_metrics(seq, all_orders(inst, seq), inst, van)
+    # Re-derive each time from the miles and the rate: the reported fields must agree with each other.
     rate = inst.params.drive_min_per_mile
     assert m.drive_min == pytest.approx(m.miles_total * rate)
     assert m.duty_min == pytest.approx(m.drive_min + m.unload_min)
@@ -143,6 +154,7 @@ def test_metrics_are_internally_consistent(inst, van):
 
 # --- invalid inputs ----------------------------------------------------------
 
+# One test per (sequence, orders, reason) row: each is an invalid route that must be rejected.
 @pytest.mark.parametrize("sequence, orders, why", [
     ([0, 4], [4, 10], "depot in sequence"),
     ([4, 4], [4, 10], "location visited twice"),
@@ -153,5 +165,6 @@ def test_metrics_are_internally_consistent(inst, van):
     ([4, 7], [4, 10], "stop 7 has no order on this route"),
 ])
 def test_invalid_inputs_raise(inst, van, sequence, orders, why):
+    # The test passes only if route_metrics raises ValueError.
     with pytest.raises(ValueError):
         route_metrics(sequence, orders, inst, van)

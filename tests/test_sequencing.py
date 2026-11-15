@@ -108,30 +108,35 @@ def van(inst):
 
 def all_orders(inst, stops):
     """Every order at the given stops."""
+    # Gather every order number at the given stops.
     return [o for s in stops for o in inst.orders_at[s]]
 
 
 def brute_force(stops, inst, van):
     """Reference answer: route_metrics on EVERY order, cheapest feasible."""
+    # Slow but obviously correct: try every order and let route.py judge each one.
     feasible = []
     for perm in itertools.permutations(stops):
         m = route_metrics(perm, all_orders(inst, stops), inst, van)
         if m.feasible:
             feasible.append(m.miles_total)
-    return min(feasible) if feasible else None
+    return min(feasible) if feasible else None  # None = no order is legal
 
 
+# No stops: the answer is an empty route, and it counts as proven.
 def test_empty_set(inst, van):
     r = exact_sequence([], [], inst, van)
     assert r.sequence == () and r.metrics.miles_total == 0 and r.proven
 
 
+# One stop has only one order; 402 miles x 1.5 = 603 drive minutes.
 def test_single_stop(inst, van):
     r = exact_sequence([14], all_orders(inst, [14]), inst, van)
     assert r.sequence == (14,)
     assert r.metrics.drive_min == pytest.approx(603)
 
 
+# exact must match the brute-force answer on three different stop sets.
 @pytest.mark.parametrize("stops", [[1, 2, 3, 4, 5], [25, 1, 2, 3, 4], [14, 3, 4]])
 def test_exact_matches_brute_force(inst, van, stops):
     r = exact_sequence(stops, all_orders(inst, stops), inst, van)
@@ -144,12 +149,13 @@ def test_exact_matches_brute_force(inst, van, stops):
 
 def test_exact_never_worse_than_nn_2opt(inst, van):
     # Was compared against rung 2; rung 2 is removed, so compare rung 1.
-    rng = random.Random(0)
+    rng = random.Random(0)  # fixed seed: the same 25 random sets on every run
     for _ in range(25):
         stops = rng.sample(list(inst.stops), rng.randint(2, 6))
         orders = all_orders(inst, stops)
         ex = exact_sequence(stops, orders, inst, van)
         he = nn_2opt_sequence(stops, orders, inst, van)
+        # Compare only when the heuristic found a legal order.
         if he.sequence is not None:
             # 2-opt found a feasible order, so exact must too, no worse.
             assert ex.sequence is not None
@@ -162,17 +168,20 @@ def test_best_sequence_runs_the_named_method(inst, van, name):
     # method it is told to, with no automatic switching.
     stops = [1, 2, 3, 4]
     orders = all_orders(inst, stops)
+    # Going through best_sequence must give exactly the same result as calling the method directly.
     via_dispatch = best_sequence(stops, orders, inst, van, method=name)
     direct = METHODS[name](stops, orders, inst, van)
     assert via_dispatch == direct
 
 
 def test_best_sequence_requires_method(inst, van):
+    # method has no default, so leaving it out must fail.
     with pytest.raises(TypeError):          # required argument missing
         best_sequence([1, 2], all_orders(inst, [1, 2]), inst, van)
 
 
 def test_best_sequence_exact_respects_size_limit(inst, van):
+    # 9 stops is above the default cap of 8, so exact must refuse until the cap is raised.
     big = [25, 1, 2, 12, 11, 9, 8, 5, 10]          # 9 stops
     with pytest.raises(ValueError):
         best_sequence(big, all_orders(inst, big), inst, van, method="exact")
@@ -190,6 +199,7 @@ def test_known_limitation_long_span_bound_route(inst, van):
     """
     stops = [25, 1, 2, 12, 11, 9, 8, 5, 10, 6, 4, 3]
     orders = all_orders(inst, stops)
+    # The input order of this list is itself a legal order, so a feasible route exists.
     legal = route_metrics(stops, orders, inst, van)
     assert legal.feasible                                   # a legal order exists
     assert nn_sequence(stops, orders, inst, van).sequence is None
@@ -197,6 +207,7 @@ def test_known_limitation_long_span_bound_route(inst, van):
 
 
 def test_too_many_stops_for_exact(inst, van):
+    # The first 9 stops: more than the default cap.
     stops = list(inst.stops[:9])
     with pytest.raises(ValueError):
         exact_sequence(stops, all_orders(inst, stops), inst, van)
@@ -204,6 +215,7 @@ def test_too_many_stops_for_exact(inst, van):
 
 def test_split_orders_passed_through(inst, van):
     # Only order 41 of location 7's two orders rides on this van.
+    # Only order 41 of location 7 is on this van: volume 120 + 85 + 200, unload 30 + 30 + 30.
     r = exact_sequence([7, 4], [41, 4, 10], inst, van)
     assert r.metrics.volume_ft3 == 120 + 85 + 200
     assert r.metrics.unload_min == pytest.approx(90)
@@ -214,6 +226,7 @@ def test_split_orders_passed_through(inst, van):
 def test_ladder_story_on_synthetic(syn):
     """Each rung, on the instance where the cheapest tour breaks span."""
     van = syn.params.vehicle("Van")
+    # The same inputs are reused for all three methods.
     args = ([1, 2, 3], [0, 1, 2], syn, van)
     # Rung 0: nearest neighbour happens to pick 1-2-3, which is feasible.
     r0 = nn_sequence(*args)
@@ -234,6 +247,7 @@ def test_exact_effort_counts_on_synthetic(syn):
 
 
 def test_two_opt_never_worse_than_nn(inst, van):
+    # Try every stop as a starting point.
     for seed in inst.stops:
         # The stop plus its 4 nearest stops: a route-like set.
         near = sorted(inst.stops, key=lambda s: (inst.dist_mi[seed, s], s))[:5]
@@ -245,6 +259,7 @@ def test_two_opt_never_worse_than_nn(inst, van):
 
 @pytest.mark.parametrize("name", sorted(METHODS))
 def test_every_rung_returns_a_permutation(inst, van, name):
+    # A route must contain each of its stops exactly once: sorted(result) == the stop list.
     stops = [1, 2, 3, 4, 5]
     r = best_sequence(stops, all_orders(inst, stops), inst, van, method=name)
     if r.sequence is not None:
@@ -253,5 +268,6 @@ def test_every_rung_returns_a_permutation(inst, van, name):
 
 
 def test_best_sequence_unknown_method(inst, van):
+    # A misspelt method name must fail loudly.
     with pytest.raises(ValueError):
         best_sequence([1, 2], all_orders(inst, [1, 2]), inst, van, method="magic")

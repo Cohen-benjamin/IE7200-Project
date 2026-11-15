@@ -1,7 +1,7 @@
 # Data Findings
 
 Results of `dispatch.audit` on the CSVs in `data/csv/` (Monday instance).
-Reproduce with `python experiments/audit_report.py`; numbers are checked in `tests/test_data.py` and `tests/test_audit.py`.
+Numbers are checked in `tests/test_data.py`.
 
 | # | Check | Finding | Impact / handling |
 |---|---|---|---|
@@ -14,3 +14,6 @@ Reproduce with `python experiments/audit_report.py`; numbers are checked in `tes
 | 7 | Single-stop feasibility | All 34 stops feasible on depot -> s -> depot. Tightest: loc 14 (201 mi), round-trip drive 603 of 660 min (57 min = 38 mi slack), duty 663 of 840. Far stops bind on drive, near stops on duty, loc 7 on volume. | Problem is feasible (one van per stop is a valid, if poor, solution and an upper bound of 34 routes). Loc 14 has little room to share a route. |
 | 8 | One visit per location (M1) | No duplicate locations (no 0-mile pairs, `GlobalLocationId` unique); no stop forced to split (#6, #7). | "One visit per location, all its orders together" is valid for M1. Caveat: with #3, a route could in principle save miles by passing through a stop again; the model uses direct arcs and does not exploit this. |
 | 9 | Mixed vehicle eligibility (M2) | Stops 7, 12, 24 mix "Straight Truck only" and "Van OK" orders. | Ignored in M1 (Van only, per CLAUDE.md). In M2 these stops may need two visits by different vehicle types. |
+| 10 | Professor's checker vs our data | `Assignment/Solution_Check.xlsm` (read without running macros) matches all 43 Monday orders by `GlobalOrderId` (volume and day) and all 595 distance pairs of our 35x35 matrix exactly. | Independent confirmation that the CSVs and the loader are correct. |
+| 11 | Depot location | Our depot legs equal the workbook's distances from ZIP 01887 (Wilmington, as in the case article). The brief calls the depot Ayer. | Reported as a brief/data discrepancy; the data is used as given. |
+| 12 | Checker rules differ from M1 | The workbook applies the original case rules: 10-hour breaks when drive > 11 h or duty > 14 h, waiting until 08:00, and all 261 week orders. | A route the workbook accepts is not necessarily M1-feasible. `validate.py` is the M1 authority; the workbook is a cross-check on routes needing no break. |
