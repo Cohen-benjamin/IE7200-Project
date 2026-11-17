@@ -11,8 +11,8 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from dispatch.data import FILE_PREFIX, load_instance
-from dispatch.params import load_params
+from dispatch.ingest.data import FILE_PREFIX, load_instance
+from dispatch.ingest.params import load_params
 from dispatch.route import route_metrics
 from dispatch.validate import METRIC_COLS, validate_plan
 
@@ -54,7 +54,7 @@ def plan_rows(routes, inst):
 
 def check(df, inst, params, tmp_path):
     """Write the plan to CSV, read it back, validate; return {(route, code)}."""
-    # Go through a real CSV file, as a professor's plan would; tmp_path is a throw-away folder.
+    # Go through a real CSV file, as a submitted plan file would; tmp_path is a throw-away folder.
     df.to_csv(tmp_path / "plan.csv", index=False)
     v = validate_plan(pd.read_csv(tmp_path / "plan.csv"), inst, params)
     # A set of (route, problem-code) pairs makes 'exactly this problem and nothing else' easy to assert.
@@ -139,4 +139,15 @@ def test_validate_shares_no_code_with_solvers():
     tree = ast.parse((ROOT / "src" / "dispatch" / "validate.py").read_text())
     mods = {n.module for n in ast.walk(tree) if isinstance(n, ast.ImportFrom) and n.module}
     mods |= {a.name for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names}
-    assert {m for m in mods if m.startswith("dispatch")} <= {"dispatch.data", "dispatch.params"}
+    assert {m for m in mods if m.startswith("dispatch")} <= {"dispatch.ingest.data", "dispatch.ingest.params"}
+
+
+def test_unload_formula_must_match_the_data_file(inst, params, tmp_path):
+    # Pretend the data file says order 26 takes 10 minutes longer than the formula gives.
+    orders = inst.orders.copy()
+    orders.loc[26, "UnloadTime_min"] += 10
+    changed = dataclasses.replace(inst, orders=orders)
+    df = plan_rows(singles(inst), inst)                  # the plan itself is unchanged and valid
+    codes, v = check(df, changed, params, tmp_path)
+    assert codes == {(14, "unload_vs_data")}             # order 26 is on the route for location 14
+    assert "data file UnloadTime_min" in v[0].detail

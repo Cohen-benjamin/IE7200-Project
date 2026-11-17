@@ -1,12 +1,12 @@
 """Run every solver option set on the full instance and on seeded subsets.
 
-One command, from the repo root:   python experiments/run_benchmark.py   (about 2 minutes)
+One command, from the repo root:   python experiments/run_benchmark.py   (about 4 minutes)
 
 What it does
 ------------
-1. FULL instance (34 stops): every option set of nearest neighbour (6) and
-   Clarke-Wright (12). No optimum is known for 34 stops, so there is no gap.
-2. SUBSETS of 8 and 9 stops (random and clustered, seeds fixed below): brute
+1. FULL instance (34 stops): every option set of nearest neighbour (4) and
+   Clarke-Wright (36). No optimum is known for 34 stops, so there is no gap.
+2. SUBSETS of 9 stops (40 stored subsets: 20 clustered, 20 random): brute
    force gives the TRUE optimum, so each option set's gap to optimal is exact.
 3. Every plan is saved to a temporary CSV and checked by validate_plan
    against its own (sub)instance BEFORE it is recorded. An invalid plan stops
@@ -30,8 +30,8 @@ import sys
 # Let "import dispatch" work without "pip install -e ." by adding the src/ folder to Python's search path.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from dispatch.data import FILE_PREFIX, load_instance
-from dispatch.params import load_params
+from dispatch.ingest.data import FILE_PREFIX, load_instance
+from dispatch.ingest.params import load_params
 from dispatch.solvers import brute, clarke_wright, nearest_neighbor
 from dispatch.validate import validate_plan
 
@@ -40,14 +40,15 @@ DATA_DIR = ROOT / "data" / "csv"  # where the instance CSVs live
 RESULTS_DIR = ROOT / "results"                  # gitignored; NOT outputs/ (see module docstring)
 
 # --- Settings: fixed so every run is identical (runtimes aside) ----------------
-SEEDS = range(5)                                # subset seeds 0..4
-SUBSET_SIZES = (8, 9)                           # stops per brute-force subset
-MODES = ("random", "clustered")                 # how subsets are drawn
-EXACT_CAP = 9                                   # max_exact_stops given to every solver
-NN_SEQUENCING = ("nn", "nn_2opt", "exact")  # sequencing methods tried with nearest neighbour
+# The 40 brute-force subsets (all 9 stops) are STORED in this file, not drawn at run time, so the benchmark never
+# depends on a random number generator. experiments/make_subsets.py shows how the file was made.
+SUBSETS_FILE = ROOT / "data" / "benchmark_subsets_k9.csv"
+EXACT_CAP = 10                                  # max_exact_stops given to every solver
+NN_SEQUENCING = ("nn", "nn_2opt")  # sequencing methods tried with nearest neighbour ("exact" is not benchmarked: too slow, never best)
 NN_SPLIT = (False, True)  # orders kept together / allowed to split
 CW_LAMBDAS = (0.5, 0.8, 1.0, 1.2, 1.5, 2.0)  # Clarke-Wright savings shapes tried
-CW_RESEQUENCE = (False, True)  # keep merged order / re-order merged routes
+CW_SEQUENCING = (None, "nn", "nn_2opt")  # Clarke-Wright merged routes: None = keep the joined order, else re-order with this method
+CW_SPLIT = (False, True)  # Clarke-Wright: orders at a location kept together / allowed to split
 
 
 def option_sets(cap: int = EXACT_CAP) -> list:
@@ -56,23 +57,27 @@ def option_sets(cap: int = EXACT_CAP) -> list:
     Inputs:
         cap: max_exact_stops given to each solver (route size cap for exact search).
     Output:
-        list of 18 functions (6 nearest neighbour, 12 Clarke-Wright), in a
+        list of 40 functions (4 nearest neighbour, 36 Clarke-Wright), in a
         fixed order. Each Solution's .method string records its options.
     """
     # Build one small function per option set; the benchmark calls each on the same data.
     fns = []
-    # Nearest neighbour: 3 sequencing methods x 2 split options = 6 option sets.
+    # Nearest neighbour: 2 sequencing methods x 2 split options = 4 option sets.
     for seq in NN_SEQUENCING:
         for split in NN_SPLIT:
             # seq=seq, split=split bind THIS loop's values (otherwise every
             # function would see only the last ones).
             fns.append(lambda inst, seq=seq, split=split: nearest_neighbor.solve(
                 inst, sequencing=seq, split_orders=split, max_exact_stops=cap))
-    # Clarke-Wright: 6 lam values x 2 re-sequence options = 12 option sets.
+    # Clarke-Wright: 6 lam values x 3 ways to order a merged route (as joined / nn / nn_2opt) x 2 split options = 36 option sets.
     for lam in CW_LAMBDAS:
-        for reseq in CW_RESEQUENCE:
-            fns.append(lambda inst, lam=lam, reseq=reseq: clarke_wright.solve(
-                inst, lam=lam, resequence=reseq, max_exact_stops=cap))
+        for seq in CW_SEQUENCING:
+            for split in CW_SPLIT:
+                # lam, seq, split are bound per loop pass, like seq and split above.
+                # seq None = resequence off (the sequencing argument is then ignored by the solver).
+                fns.append(lambda inst, lam=lam, seq=seq, split=split: clarke_wright.solve(
+                    inst, lam=lam, resequence=seq is not None, sequencing=seq or "nn_2opt",
+                    split_orders=split, max_exact_stops=cap))
     return fns
 
 
@@ -120,17 +125,16 @@ def run_one(solve_fn, instance, params, tmp_dir) -> dict:
     return row
 
 
-def run_benchmark(subset_sizes=SUBSET_SIZES, seeds=SEEDS, modes=MODES,
-                  cap: int = EXACT_CAP, full_instance: bool = True) -> pd.DataFrame:
+def run_benchmark(subsets_file=SUBSETS_FILE, cap: int = EXACT_CAP, full_instance: bool = True) -> pd.DataFrame:
     """Run everything; one row per (instance or subset, method).
 
     Inputs:
-        subset_sizes, seeds, modes: which brute-force subsets to draw.
+        subsets_file: CSV of stored brute-force subsets (see brute.load_subsets).
         cap: max_exact_stops for every solver.
         full_instance: include the full 34-stop instance (False for quick tests).
     Output:
-        DataFrame with scope ("full" or "subset"), k, mode, seed, the
-        run_one columns, optimal_miles and gap_pct (subsets only; empty on full).
+        DataFrame with scope ("full" or "subset"), k, mode (the subset's kind: clustered / random),
+        seed (the subset_id in the subsets file), the run_one columns, optimal_miles and gap_pct (subsets only; empty on full).
     """
     # Step 1: load the data and the limits once.
     inst = load_instance(DATA_DIR)
@@ -147,21 +151,19 @@ def run_benchmark(subset_sizes=SUBSET_SIZES, seeds=SEEDS, modes=MODES,
                 workloads.append(result.pop("workload").assign(method=result["method"]))   # keep out of the row
                 rows.append({"scope": "full", "k": len(inst.stops), "mode": "", "seed": "", **result})
         # --- Subsets: brute force is the reference --------------------------
-        # Part B: small random or clustered subsets where brute force finds the true optimum.
-        for k in subset_sizes:
-            for mode in modes:
-                for seed in seeds:
-                    stops = brute.draw_subset(inst, k, seed, mode)  # pick k stops with a fixed seed (same every run)
-                    sub = brute.restrict_instance(inst, stops)      # the subset's own problem
-                    # Brute force first: its miles are the optimum for this subset.
-                    best = run_one(lambda _s: brute.solve(inst, stops=stops), sub, params, tmp)  # the lambda ignores its input and solves this subset
-                    group = [best] + [run_one(fn, sub, params, tmp) for fn in option_sets(cap)]  # brute force first, then every heuristic on the same subset
-                    for r in group:
-                        r.pop("workload")                       # per-route tables are kept for the full instance only
-                        r["method"] = "brute (optimal)" if r["method"].startswith("brute") else r["method"]
-                        r["optimal_miles"] = best["total_miles"]
-                        r["gap_pct"] = (r["total_miles"] - best["total_miles"]) / best["total_miles"] * 100  # % above the optimum (0 = optimal)
-                        rows.append({"scope": "subset", "k": k, "mode": mode, "seed": seed, **r})
+        # Part B: small subsets (read from the stored file) where brute force finds the true optimum.
+        for item in brute.load_subsets(subsets_file, inst):
+            stops = item["stops"]
+            sub = brute.restrict_instance(inst, stops)          # the subset's own problem
+            # Brute force first: its miles are the optimum for this subset.
+            best = run_one(lambda _s: brute.solve(inst, stops=stops), sub, params, tmp)  # the lambda ignores its input and solves this subset
+            group = [best] + [run_one(fn, sub, params, tmp) for fn in option_sets(cap)]  # brute force first, then every heuristic on the same subset
+            for r in group:
+                r.pop("workload")                               # per-route tables are kept for the full instance only
+                r["method"] = "brute (optimal)" if r["method"].startswith("brute") else r["method"]
+                r["optimal_miles"] = best["total_miles"]
+                r["gap_pct"] = (r["total_miles"] - best["total_miles"]) / best["total_miles"] * 100  # % above the optimum (0 = optimal)
+                rows.append({"scope": "subset", "k": item["k"], "mode": item["kind"], "seed": item["subset_id"], **r})
     # Fixed column order, so the CSV looks the same every time.
     columns = ["scope", "k", "mode", "seed", "method", "routes", "total_miles",
                "avg_volume_util", "max_volume_util", "avg_drive_util", "max_drive_util",
@@ -239,9 +241,10 @@ def to_markdown(df: pd.DataFrame, cap: int = EXACT_CAP) -> str:
 
     # Notes: the settings used and how to read the numbers.
     parts += ["## Notes", "",
-              f"- Subsets: sizes {sorted(sub['k'].unique().tolist()) if len(sub) else []}, "
-              f"modes {sorted(sub['mode'].unique().tolist()) if len(sub) else []}, "
-              f"seeds {sorted(sub['seed'].unique().tolist()) if len(sub) else []} (all fixed).",
+              f"- Subsets: {sub.groupby(['mode', 'seed']).ngroups if len(sub) else 0} stored subsets of "
+              f"{sorted(sub['k'].unique().tolist()) if len(sub) else []} stops "
+              f"({', '.join(f'{n} {m}' for m, n in sub.groupby('mode')['seed'].nunique().items()) if len(sub) else 'none'}) "
+              "read from data/benchmark_subsets_k9.csv; nothing is drawn at run time.",
               f"- Exact-sequencing route cap: max_exact_stops = {cap} for every solver.",
               f"- All {len(df)} plans were saved to CSV and passed validate_plan before being recorded.",
               "- Brute force is optimal among plans that keep each location's orders on one van; "

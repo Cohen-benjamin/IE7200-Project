@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from dispatch.data import load_instance
+from dispatch.ingest.data import load_instance
 from dispatch.route import route_metrics
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data" / "csv"
@@ -30,33 +30,6 @@ def all_orders(inst, sequence):
     """Every order at the given locations (helper for whole-stop routes)."""
     # orders_at maps a location to its order numbers; this gathers them for every stop.
     return [o for s in sequence for o in inst.orders_at[s]]
-
-
-# --- hand-computed route (values supplied by the user) ---------------------
-
-@pytest.mark.skip(reason="awaiting hand-computed values from the user")
-def test_hand_computed_two_stop_route(inst, van):
-    """depot -> 4 -> 7 -> depot, orders 4, 10, 3, 41.
-
-    Inputs: d(0,4)=17, d(4,7)=2, d(7,0)=16 mi; volumes 85, 200, 1676, 120 ft3.
-    Replace each None with the hand-computed value, then remove the skip.
-    """
-    m = route_metrics([4, 7], [4, 10, 3, 41], inst, van)
-    expected = {
-        "miles_total": None,
-        "miles_interstop": None,
-        "drive_min": None,
-        "unload_min": None,
-        "duty_min": None,
-        "span_min": None,
-        "volume_ft3": None,
-        "slack_volume_ft3": None,
-        "slack_drive_min": None,
-        "slack_duty_min": None,
-        "slack_span_min": None,
-    }
-    for field, value in expected.items():
-        assert getattr(m, field) == pytest.approx(value), field
 
 
 # --- edge cases ------------------------------------------------------------

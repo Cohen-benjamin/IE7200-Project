@@ -12,8 +12,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from dispatch.data import Instance, load_instance
-from dispatch.params import Params, VehicleType
+from dispatch.ingest.data import Instance, load_instance
+from dispatch.ingest.params import Params, VehicleType
 from dispatch.route import route_metrics
 from dispatch.sequencing import (
     METHODS, best_sequence, exact_sequence, nn_2opt_sequence, nn_sequence,
@@ -73,8 +73,7 @@ def test_synthetic_min_mile_order_breaks_span(syn):
 
 def test_exact_finds_feasible_non_minimum_order(syn):
     van = syn.params.vehicle("Van")
-    # Read by field name: the result now has 6 fields (effort was added),
-    # so the original 4-value unpacking no longer fits.
+    # Read by field name: the result has several fields, so positional unpacking would be fragile.
     r = exact_sequence([1, 2, 3], [0, 1, 2], syn, van)
     assert r.sequence == (1, 2, 3)   # 1-2-3 and 2-1-3 tie; lower tuple wins
     assert r.metrics.miles_total == 19
@@ -148,7 +147,7 @@ def test_exact_matches_brute_force(inst, van, stops):
 
 
 def test_exact_never_worse_than_nn_2opt(inst, van):
-    # Was compared against rung 2; rung 2 is removed, so compare rung 1.
+    # The exact search can never be worse than the heuristic (rung 1, nn_2opt).
     rng = random.Random(0)  # fixed seed: the same 25 random sets on every run
     for _ in range(25):
         stops = rng.sample(list(inst.stops), rng.randint(2, 6))
@@ -164,8 +163,7 @@ def test_exact_never_worse_than_nn_2opt(inst, van):
 
 @pytest.mark.parametrize("name", sorted(METHODS))
 def test_best_sequence_runs_the_named_method(inst, van, name):
-    # Replaces the old "auto" test: best_sequence must run exactly the
-    # method it is told to, with no automatic switching.
+    # best_sequence must run exactly the method it is told to, with no automatic switching.
     stops = [1, 2, 3, 4]
     orders = all_orders(inst, stops)
     # Going through best_sequence must give exactly the same result as calling the method directly.
@@ -181,34 +179,38 @@ def test_best_sequence_requires_method(inst, van):
 
 
 def test_best_sequence_exact_respects_size_limit(inst, van):
-    # 9 stops is above the default cap of 8, so exact must refuse until the cap is raised.
+    # The default cap is 10 stops: an 11-stop set is refused before any search starts.
+    eleven = list(inst.stops[:11])
+    with pytest.raises(ValueError):
+        best_sequence(eleven, all_orders(inst, eleven), inst, van, method="exact")
+    # A 9-stop set is refused when the cap is lowered below its size, and solved when it is not.
     big = [25, 1, 2, 12, 11, 9, 8, 5, 10]          # 9 stops
     with pytest.raises(ValueError):
-        best_sequence(big, all_orders(inst, big), inst, van, method="exact")
+        best_sequence(big, all_orders(inst, big), inst, van, method="exact", max_exact_stops=8)
     r = best_sequence(big, all_orders(inst, big), inst, van, method="exact",
                       max_exact_stops=9)
     assert r.proven is True
 
 
-def test_known_limitation_long_span_bound_route(inst, van):
-    """Documents the limitation recorded in the module docstring and LADDER.md.
+def test_nn_2opt_serves_the_long_span_bound_route(inst, van):
+    """A 12-stop set with one legal order that is hard to find.
 
-    A legal order exists for this 12-stop set (span 594 of 600), but both
-    heuristic rungs minimise total miles and report it infeasible. If a future
-    change makes this pass with a feasible order, update the docs too.
+    A legal order exists (span 594 of 600 as listed). Plain nn fails on it, but
+    span-aware 2-opt repairs the nn tour into a legal one.
     """
     stops = [25, 1, 2, 12, 11, 9, 8, 5, 10, 6, 4, 3]
     orders = all_orders(inst, stops)
-    # The input order of this list is itself a legal order, so a feasible route exists.
     legal = route_metrics(stops, orders, inst, van)
     assert legal.feasible                                   # a legal order exists
     assert nn_sequence(stops, orders, inst, van).sequence is None
-    assert nn_2opt_sequence(stops, orders, inst, van).sequence is None
+    r = nn_2opt_sequence(stops, orders, inst, van)
+    assert r.sequence is not None and r.metrics.feasible    # span-aware 2-opt found one
+    assert sorted(r.sequence) == sorted(stops)
 
 
 def test_too_many_stops_for_exact(inst, van):
-    # The first 9 stops: more than the default cap.
-    stops = list(inst.stops[:9])
+    # The first 11 stops: more than the default cap of 10.
+    stops = list(inst.stops[:11])
     with pytest.raises(ValueError):
         exact_sequence(stops, all_orders(inst, stops), inst, van)
 
@@ -231,10 +233,11 @@ def test_ladder_story_on_synthetic(syn):
     # Rung 0: nearest neighbour happens to pick 1-2-3, which is feasible.
     r0 = nn_sequence(*args)
     assert r0.sequence == (1, 2, 3) and r0.metrics.miles_total == 19
-    # Rung 1: 2-opt cuts miles to 14 (1-3-2) and BREAKS span.
+    # Rung 1: 2-opt is span-aware. Plain miles would choose 1-3-2 (14 miles), which
+    # breaks span, so it keeps the legal 1-2-3.
     r1 = nn_2opt_sequence(*args)
-    assert r1.sequence is None
-    assert r1.metrics.miles_total == 14 and not r1.metrics.feasible
+    assert r1.sequence == (1, 2, 3)
+    assert r1.metrics.miles_total == 19 and r1.metrics.feasible
     # Reference: exact proves 19 miles is the best feasible.
     assert exact_sequence(*args).metrics.miles_total == 19
 
@@ -254,7 +257,10 @@ def test_two_opt_never_worse_than_nn(inst, van):
         orders = all_orders(inst, near)
         a = nn_sequence(near, orders, inst, van)
         b = nn_2opt_sequence(near, orders, inst, van)
-        assert b.metrics.miles_total <= a.metrics.miles_total
+        # If nn's tour already meets span, 2-opt only saves miles. If it does not, 2-opt may spend
+        # extra miles to cut the span excess, so the miles comparison would not be fair.
+        if a.metrics.slack_span_min >= 0:
+            assert b.metrics.miles_total <= a.metrics.miles_total
 
 
 @pytest.mark.parametrize("name", sorted(METHODS))
@@ -271,3 +277,15 @@ def test_best_sequence_unknown_method(inst, van):
     # A misspelt method name must fail loudly.
     with pytest.raises(ValueError):
         best_sequence([1, 2], all_orders(inst, [1, 2]), inst, van, method="magic")
+
+
+def test_two_opt_never_adds_span_excess(inst, van):
+    # Span-aware 2-opt: the span excess (minutes over the limit) of its tour is never more than the
+    # nearest-neighbour tour it started from. Random stop sets, fixed seed.
+    rng = random.Random(1)
+    for _ in range(40):
+        stops = rng.sample(list(inst.stops), rng.randint(3, 9))
+        orders = all_orders(inst, stops)
+        start = nn_sequence(stops, orders, inst, van).metrics
+        after = nn_2opt_sequence(stops, orders, inst, van).metrics
+        assert max(0.0, -after.slack_span_min) <= max(0.0, -start.slack_span_min) + 1e-9

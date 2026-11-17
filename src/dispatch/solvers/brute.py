@@ -2,9 +2,8 @@
 
 Why it exists
 -------------
-Brief section 4.1: brute force on 6-9 stops is the only place you will ever
-know the true global optimum, so it is the only place a heuristic's error
-can be measured exactly (run nearest neighbour on the same subset and compare).
+Brief section 4.1: brute force on 6-9 stops is the only place the true global
+optimum is known, so it is the only place a heuristic's error can be measured exactly (run nearest neighbour on the same subset and compare).
 
 How it works
 ------------
@@ -21,7 +20,7 @@ The number of ways to split n stops into routes is the Bell number B(n):
     B(6) = 203     B(7) = 877      B(8) = 4,140     B(9) = 21,147
     B(10) = 115,975    B(12) = 4,213,597    B(34) ~ 2.1 x 10^28
 That growth is why the full 34-stop problem is out of reach and why this
-solver refuses more than max_stops (default 9) stops.
+solver refuses more than max_stops (default 10) stops.
 
 Runtime
 -------
@@ -29,8 +28,9 @@ Re-sequencing a block for every partition would be wasteful. There are only
 2^n - 1 distinct blocks (511 for n = 9), so each is sequenced exactly once
 (remembered in `memo`) and partitions just add stored miles. The cost is
 dominated by the largest blocks (exact sequencing is about k! work): measured
-7 stops 0.03 s, 8 stops 0.13 s, 9 stops 1.3 s, about 4 s for a whole 9-stop
-subset. Summing the 21,147 partitions is then instant.
+7 stops 0.03 s, 8 stops 0.13 s, 9 stops 1.3 s, 10 stops about 21 s; about 4 s
+for a whole 9-stop subset and about 1 minute for a 10-stop one. Summing the
+partitions (21,147 for 9 stops, 115,975 for 10) is then fast.
 
 Scope: optimal among plans that keep each location's orders on ONE van.
 (Splitting orders would mean partitioning ORDERS, whose Bell number is far
@@ -47,15 +47,15 @@ from typing import Iterator, Sequence
 
 import pandas as pd
 
-from dispatch.data import Instance
-from dispatch.params import Params, VehicleType
+from dispatch.ingest.data import Instance
+from dispatch.ingest.params import Params, VehicleType
 from dispatch.sequencing import exact_sequence
 from dispatch.solution import Solution, make_solution
 
 # Vehicle used when none is given (M1 fleet). A name, not a model number.
 DEFAULT_VEHICLE = "Van"
-# Largest subset solved: B(9) = 21,147 partitions, about 4 s.
-DEFAULT_MAX_STOPS = 9
+# Largest subset solved: B(10) = 115,975 partitions, about 1 minute.
+DEFAULT_MAX_STOPS = 10
 
 
 def set_partitions(items: Sequence[int]) -> Iterator[list[tuple[int, ...]]]:
@@ -137,17 +137,51 @@ def draw_subset(instance: Instance, k: int, seed: int, mode: str = "random") -> 
     stops = instance.stops                                   # sorted tuple of the 34 stops
     if not 1 <= k <= len(stops):
         raise ValueError(f"k must be between 1 and {len(stops)}, got {k}")
-    # A seed fixes the 'random' choices, so every run (and every professor) gets the same subset.
+    # A seed fixes the 'random' choices, so every run gets the same subset.
     rng = random.Random(seed)                                # own generator: no global state touched
     if mode == "random":
         return tuple(sorted(rng.sample(stops, k)))           # k different stops, uniformly
     if mode == "clustered":
-        seed_stop = rng.choice(stops)                        # centre of the cluster
-        d = instance.dist_mi
-        # Nearest first; the seed stop itself is 0 miles away, so it comes first.
-        nearest = sorted(stops, key=lambda s: (d[seed_stop, s], s))[:k]
-        return tuple(sorted(nearest))
+        return cluster_around(instance, rng.choice(stops), k)   # centre of the cluster chosen by the seed
     raise ValueError(f"unknown mode {mode!r}; use 'random' or 'clustered'")
+
+
+def cluster_around(instance: Instance, centre: int, k: int) -> tuple[int, ...]:
+    """The k stops nearest to `centre` (the centre itself included): a tight, route-like group.
+
+    Inputs:
+        instance: the full instance (uses the distance matrix, miles).
+        centre: LocationIndex of the stop the cluster is built around.
+        k: how many stops the cluster has.
+    Output:
+        sorted tuple of k LocationIndex values. Ties on distance go to the lower LocationIndex,
+        so the result depends only on the distances: no random numbers are involved.
+    """
+    d = instance.dist_mi
+    # Nearest first; the centre is 0 miles from itself, so it always comes first.
+    nearest = sorted(instance.stops, key=lambda s: (d[centre, s], s))[:k]
+    return tuple(sorted(nearest))
+
+
+def load_subsets(path, instance: Instance) -> list[dict]:
+    """Read the stored benchmark subsets, so they are never re-drawn at run time.
+
+    Inputs:
+        path: CSV with columns subset_id, kind, k, stops (LocationIndex values separated by spaces), source.
+        instance: the full instance, used to check every stop exists.
+    Output:
+        list of dicts with subset_id, kind ("clustered" / "random"), k and stops (sorted tuple), in file order.
+        Raises ValueError if a row has repeated or unknown stops, or a stop count different from k.
+    """
+    table = pd.read_csv(path)
+    valid = set(instance.stops)
+    out = []
+    for row in table.itertuples():
+        stops = tuple(sorted(int(s) for s in str(row.stops).split()))   # "3 4 7" -> (3, 4, 7)
+        if len(set(stops)) != len(stops) or len(stops) != int(row.k) or not set(stops) <= valid:
+            raise ValueError(f"subset {row.subset_id} in {path}: needs {row.k} distinct valid stops, got {list(stops)}")
+        out.append({"subset_id": int(row.subset_id), "kind": row.kind, "k": int(row.k), "stops": stops})
+    return out
 
 
 def solve(

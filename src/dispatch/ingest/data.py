@@ -16,7 +16,7 @@ import numpy as np
 import pandas as pd
 
 # Reuse the parameter loader so there is one place that reads parameters.csv.
-from dispatch.params import Params, load_params
+from dispatch.ingest.params import Params, load_params
 
 # Filename prefix of the Monday instance; files are named <prefix>_<table>.csv.
 # One named constant so the string is not scattered through the code.
@@ -128,7 +128,7 @@ def load_instance(data_dir: Path) -> Instance:
     # --- Locations ----------------------------------------------------------
     locations = pd.read_csv(path("locations")).set_index("LocationIndex")
     # Set difference: location ids used by orders but absent from locations.csv.
-    # used to make sure all location listed in orders are in locations list
+    # Every location used by an order must exist in the locations file.
     missing = set(orders["LocationIndex"]) - set(locations.index)
     if missing:
         raise ValueError(f"orders reference unknown locations: {sorted(missing)}")

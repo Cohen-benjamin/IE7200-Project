@@ -20,7 +20,7 @@ from typing import Sequence
 
 import pandas as pd
 
-from dispatch.data import Instance
+from dispatch.ingest.data import Instance
 from dispatch.route import RouteMetrics, route_metrics
 
 # The numbers each route reports (same names validate.py reads).
@@ -182,41 +182,6 @@ class Solution:
         # columns=CSV_COLS fixes the column order (and gives a header if empty).
         pd.DataFrame(rows, columns=CSV_COLS).to_csv(path, index=False)
 
-    @classmethod
-    def from_csv(cls, path: Path, instance: Instance) -> "Solution":
-        """Rebuild a Solution from a plan CSV written by to_csv.
-
-        Inputs:
-            path: plan CSV.
-            instance: used to recompute every route's metrics.
-        Output:
-            Solution. Metrics are RECOMPUTED with route_metrics, never read
-            from the file, so the object is always self-consistent. Checking
-            a file's claimed numbers is validate_plan's job. A header-only
-            file gives an empty Solution with method "" and runtime 0.
-        """
-        df = pd.read_csv(path)
-        if df.empty:                                         # header only: no routes
-            return cls((), "", 0.0)
-        # method and runtime repeat on every row; read them from the first.
-        method = df["method"].iloc[0]
-        method = "" if pd.isna(method) else str(method)      # an empty cell reads as NaN
-        runtime_s = float(df["runtime_s"].iloc[0])
-        routes = []
-        # groupby splits the file by route_id; rows inside stay in file order.
-        for route_id, rows in df.groupby("route_id", sort=True):
-            stop_rows = rows[rows["OrderIndex"].notna()]     # drop the depot rows (no order)
-            locs = stop_rows["LocationIndex"].astype(int).tolist()
-            # Consecutive rows at the same location are one stop:
-            # keep a location only when it differs from the row before.
-            stops = tuple(loc for i, loc in enumerate(locs) if i == 0 or loc != locs[i - 1])
-            orders = tuple(stop_rows["OrderIndex"].astype(int))      # NaN made them floats
-            vehicle = str(rows["vehicle"].iloc[0])
-            # Recompute the numbers from the routes (never copy them from the file).
-            m = route_metrics(stops, orders, instance, instance.params.vehicle(vehicle))
-            routes.append(Route(int(route_id), vehicle, stops, orders, m))
-        return cls(tuple(routes), method, runtime_s)
-
 
 def make_solution(
     route_specs: Sequence[tuple[str, Sequence[int], Sequence[int]]],
@@ -234,8 +199,8 @@ def make_solution(
         runtime_s: solver runtime (seconds).
     Output:
         Solution with route_ids 1..n. Each route's orders are put in stop
-        order (orders at the same stop keep their given order), so writing
-        to CSV and reading back gives an identical Solution.
+        order (orders at the same stop keep their given order), the same
+        order to_csv writes them in.
     """
     where = instance.orders["LocationIndex"]                 # each order's location
     routes = []
@@ -244,8 +209,8 @@ def make_solution(
         stops = tuple(int(s) for s in stops)                 # plain ints, frozen as a tuple
         # position[stop] = where that stop comes in the route (0, 1, 2 ...).
         position = {s: i for i, s in enumerate(stops)}
-        # Put orders in stop order, matching how to_csv writes them, so a CSV
-        # round trip gives the same tuple. sorted() is stable: orders at one
+        # Put orders in stop order, matching how to_csv writes them.
+        # sorted() is stable: orders at one
         # stop keep their relative order. where.get(o) is None for an unknown
         # order; it sorts last and route_metrics then rejects it clearly.
         orders = tuple(sorted((int(o) for o in orders),

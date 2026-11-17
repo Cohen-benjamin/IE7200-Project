@@ -27,12 +27,15 @@ from dataclasses import dataclass
 
 import pandas as pd
 
-from dispatch.data import Instance
-from dispatch.params import Params
+from dispatch.ingest.data import Instance
+from dispatch.ingest.params import Params
 
 # The numbers a plan claims for each route (names in the plan file).
 METRIC_COLS = ["miles_total", "miles_interstop", "drive_min", "unload_min",
                "duty_min", "span_min", "volume_ft3"]
+# The data file rounds each order's unload time to 2 decimals, so it can differ
+# from max(floor, rate * volume) by up to this much PER ORDER (DATA_FINDINGS #2).
+UNLOAD_TOL_PER_ORDER = 0.006
 # Every column the plan file must have, or we cannot check it.
 REQUIRED_COLS = ["route_id", "vehicle", "LocationIndex", "OrderIndex", *METRIC_COLS]
 
@@ -192,6 +195,9 @@ def _check_numbers(route_id, rows, stops, orders, vehicle, instance, params, met
     vols = instance.orders.loc[orders, "Volume_ft3"]     # raw volume of each order on this route
     # Unload is paid PER ORDER: apply the 30-min floor to each, then add them up.
     unload = sum(max(vehicle.min_unload_min, vehicle.unload_min_per_ft3 * v) for v in vols)
+    # Cross-check with the unload times printed in the data file itself: if the
+    # rate or the floor were read wrongly, our formula would drift away from them.
+    file_unload = float(instance.orders.loc[orders, "UnloadTime_min"].sum())
     rate = params.drive_min_per_mile                     # minutes of driving per mile
     calc = {                                             # what the route really costs
         "miles_total": float(miles),
@@ -214,6 +220,10 @@ def _check_numbers(route_id, rows, stops, orders, vehicle, instance, params, met
         if calc[key] > limit:                            # over the limit by any amount = violation
             out.append(Violation(route_id, code,
                                  f"{key} {calc[key]:.2f} > {limit:.2f} (over by {calc[key] - limit:.2f})"))
+
+    if abs(float(unload) - file_unload) > UNLOAD_TOL_PER_ORDER * len(orders):
+        out.append(Violation(route_id, "unload_vs_data",
+                             f"unload formula gives {float(unload):.2f}, data file UnloadTime_min sums to {file_unload:.2f}"))
 
     # --- Do the plan's claimed numbers match the real ones? ------------------
     claimed = rows.iloc[0]                               # claims repeat on every row; read the first

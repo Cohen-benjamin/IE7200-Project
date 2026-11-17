@@ -38,8 +38,8 @@ import sys
 # Let "import dispatch" work without "pip install -e ." by adding the src/ folder to Python's search path.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from dispatch.data import FILE_PREFIX, load_instance
-from dispatch.params import load_params
+from dispatch.ingest.data import FILE_PREFIX, load_instance
+from dispatch.ingest.params import load_params
 from dispatch.solvers import clarke_wright, nearest_neighbor
 from dispatch.validate import validate_plan
 
@@ -49,20 +49,22 @@ RESULTS_DIR = ROOT / "results"                  # gitignored; results are never 
 
 # ============================ CHOOSE HERE ====================================
 SOLVER = "clarke_wright"      # route selection: "nearest_neighbor" or "clarke_wright"
-SEQUENCING = "nn_2opt"        # how a route's stops are ordered: "nn", "nn_2opt" or "exact"
+SEQUENCING = "nn_2opt"        # how a route's stops are ordered: "nn", "nn_2opt" (or "exact": very slow, opt-in)
 SPLIT_ORDERS = False          # True = the orders at one location may go on different vans
 # Clarke-Wright only:
 LAM = 1.0                     # savings shape; 1.0 = the textbook formula
 RESEQUENCE = True             # True = re-order each merged route with SEQUENCING;
                               # False = keep its end-to-end order (SEQUENCING is then ignored)
-EXACT_CAP = 9                 # largest route (in stops) that "exact" sequencing will solve
+EXACT_CAP = 10                # largest route (in stops) that "exact" sequencing will solve
 # =============================================================================
 
 # The route-selection methods available.
 SOLVERS = {"nearest_neighbor": nearest_neighbor, "clarke_wright": clarke_wright}
 # What --all and --list run.
 ALL_SOLVERS = tuple(SOLVERS)  # tuple of a dict = its keys (both solver names)
-ALL_SEQUENCING = ("nn", "nn_2opt", "exact")
+ALL_SEQUENCING = ("nn", "nn_2opt")                  # the sequencing methods --all / --list run by default
+# "exact" tries every visit order: 1 to 6 minutes per full run, and it never beat nn_2opt, so it is opt-in (--with-exact).
+OPTIONAL_SEQUENCING = ("exact",)
 ALL_SPLIT = (False, True)
 
 
@@ -236,19 +238,22 @@ def run_selection(sel: Selection, instance, params, out_dir: Path) -> dict:
             "runtime_s": sol.runtime_s, "folder": sel.folder}
 
 
-def grid(base: Selection) -> list:
+def grid(base: Selection, with_exact: bool = False) -> list:
     """Every combination for --all / --list: solvers x sequencing x together/split.
 
     Inputs:
         base: supplies lam, resequence and exact_cap for every combination.
+        with_exact: also include the slow "exact" sequencing (default: skipped).
     Output:
         list of Selections without duplicates (Clarke-Wright with resequence
         off ignores sequencing, so it appears once per split option).
     """
     seen, out = set(), []  # seen = folders already added; out = the result list
+    # Optional methods are added to the default list only when asked for.
+    sequencing_methods = ALL_SEQUENCING + (OPTIONAL_SEQUENCING if with_exact else ())
     # Three nested loops = every pairing of solver, sequencing and split option.
     for solver in ALL_SOLVERS:
-        for seq in ALL_SEQUENCING:
+        for seq in sequencing_methods:
             for split in ALL_SPLIT:
                 sel = Selection(solver, seq, split, base.lam, base.resequence, base.exact_cap)
                 if sel.folder not in seen:                 # skip repeats (same folder = same run)
@@ -290,7 +295,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Clarke-Wright: re-order merged routes with the sequencing method")
     p.add_argument("--exact-cap", type=int, default=EXACT_CAP, help="largest route solved exactly")
     # store_true = a flag with no value: present means True.
-    p.add_argument("--all", action="store_true", help="run every combination")
+    p.add_argument("--all", action="store_true", help="run every combination (without the slow exact sequencing)")
+    p.add_argument("--with-exact", action="store_true", help="include the slow exact sequencing in --all / --list")
     p.add_argument("--list", action="store_true", help="print the command line of every combination")
     p.add_argument("--data-dir", type=Path, default=DATA_DIR, help="folder with the instance CSVs")
     p.add_argument("--out-dir", type=Path, default=RESULTS_DIR, help="where results are written")
@@ -303,14 +309,14 @@ def main(argv=None) -> list:
     base = Selection(args.solver, args.sequencing, args.split_orders, args.lam, args.resequence, args.exact_cap)  # the one selection the flags describe
 
     if args.list:                                          # just print the commands
-        for sel in grid(base):
+        for sel in grid(base, args.with_exact):
             print(sel.command())
         return []
 
     # Step 1: load the data once; every run reuses it.
     inst = load_instance(args.data_dir)
     params = load_params(Path(args.data_dir) / f"{FILE_PREFIX}_parameters.csv")   # limits for the validator
-    selections = grid(base) if args.all else [base]  # --all = 12 runs, otherwise just one
+    selections = grid(base, args.with_exact) if args.all else [base]  # --all = 8 runs (12 with --with-exact), otherwise one
     if not args.all and not base.uses_sequencing:
         print("Note: --no-resequence is on, so the sequencing setting is ignored for Clarke-Wright.")
 

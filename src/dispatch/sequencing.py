@@ -5,16 +5,15 @@ visit order: feasible on all four limits and, among feasible orders, the
 cheapest in total miles. Feasibility is ALWAYS decided by
 ``route.route_metrics(...).feasible``; this module never re-implements it.
 
-Method ladder (each rung adds one idea, so its gain can be measured;
-see LADDER.md)
+Method ladder (each rung adds one idea, so its gain can be measured)
 ------------------------------------------------------------------------
     rung 0  nn_sequence         nearest-neighbour tour from the depot
-    rung 1  nn_2opt_sequence    rung 0 + 2-opt on total miles
+    rung 1  nn_2opt_sequence    rung 0 + 2-opt on (span excess, total miles)
     ref     exact_sequence      every order; proven optimal / infeasible
-Known limitation: both heuristic rungs minimise TOTAL miles only. On a
-span-bound set the cheapest tour can break span while another order is
-legal; only exact_sequence finds that order (e.g. the 12-stop route in
-LADDER.md is reported infeasible by both rungs).
+2-opt is span-aware: it first reduces any span excess, then total miles, so
+it never turns a legal order into one that breaks span. Known limitation: both heuristic
+rungs are local searches, so on a span-bound set they can still miss the one
+legal order; only exact_sequence is guaranteed to find it.
 Every result also reports its effort: ``evaluations`` (route_metrics
 calls) and ``orders_scored`` (complete visit orders built or costed).
 
@@ -39,8 +38,8 @@ from typing import Callable, NamedTuple, Sequence
 
 import numpy as np
 
-from dispatch.data import Instance
-from dispatch.params import VehicleType
+from dispatch.ingest.data import Instance
+from dispatch.ingest.params import VehicleType
 from dispatch.route import RouteMetrics, route_metrics
 
 # method_used labels (names, not model parameters).
@@ -136,7 +135,9 @@ def _two_opt(
 
     Inputs:
         seq: starting order.
-        cost: function giving the cost (miles) of an order.
+        cost: function giving the cost of an order. A number (miles) or a
+            tuple such as (span_excess, miles): tuples compare item by item,
+            so the first item is reduced first and miles only break ties.
     Output:
         (order, n_costed): a 2-opt local optimum (no single segment reversal
         lowers the cost) and how many orders were costed to reach it.
@@ -211,17 +212,34 @@ def nn_sequence(
 
 # --- rung 1: nearest neighbour + 2-opt ------------------------------------------
 
-def _nn_2opt_tour(stops: Sequence[int], instance: Instance) -> tuple[list[int], int]:
-    """NN tour from the depot improved by 2-opt on total miles.
+def _nn_2opt_tour(
+    stops: Sequence[int], instance: Instance, unload_min: float
+) -> tuple[list[int], int]:
+    """NN tour from the depot improved by 2-opt on (span excess, total miles).
 
+    Inputs:
+        stops: the stop set to order.
+        instance: problem instance (distances and the span limit).
+        unload_min: unload minutes of the route's orders (min). The same for
+            every visit order, so it is passed in, not recomputed.
     Output: (tour, orders scored = 1 for the NN tour + those 2-opt costed).
     """
     # Step 1: a quick first order from the greedy nearest-neighbour rule.
     tour = _nearest_neighbor(stops, instance.depot_index, instance)
-    # Step 2: improve it with 2-opt. The "lambda s: ..." is a tiny unnamed
-    # function telling 2-opt how to measure an order: total miles, depot
-    # legs included.
-    tour, n_costed = _two_opt(tour, lambda s: _total_miles(s, instance))
+    # Step 2: improve it with 2-opt. cost() tells 2-opt how to measure an order
+    # as a PAIR: (minutes over the span limit, total miles). Pairs compare item
+    # by item, so 2-opt first removes any span excess and only then saves miles.
+    # Span = inter-stop driving + unloading, so a legal tour can never be
+    # made illegal. (Drive and duty depend only on total miles, which 2-opt
+    # never raises while the excess is equal, so they cannot newly break.)
+    rate = instance.params.drive_min_per_mile
+    max_span = instance.params.max_span_min
+
+    def cost(order):
+        span = _interstop_miles(order, instance) * rate + unload_min
+        return (max(0.0, span - max_span), _total_miles(order, instance))
+
+    tour, n_costed = _two_opt(tour, cost)
     # n_costed already counts the NN tour as 2-opt's starting order.
     return tour, n_costed
 
@@ -232,19 +250,26 @@ def nn_2opt_sequence(
     instance: Instance,
     vehicle: VehicleType,
 ) -> SequenceResult:
-    """Rung 1: rung 0's tour improved by 2-opt on TOTAL miles.
+    """Rung 1: rung 0's tour improved by 2-opt on (span excess, total miles).
 
     Inputs: as nn_sequence.
     Output:
-        SequenceResult, method "nn_2opt", proven False. Note: fewer miles can
-        mean MORE inter-stop miles, so this rung can break span on a set
-        that rung 0 served feasibly (see the synthetic test).
+        SequenceResult, method "nn_2opt", proven False. Fewer miles can mean
+        MORE inter-stop miles, so 2-opt is span-aware: it never accepts a
+        reorder that adds span excess. If rung 0's tour is legal, so is this
+        one, and it has no more total miles.
     """
     if len(stops) == 0:
         return _empty(orders_on_route, instance, vehicle, NN_2OPT, False)
-    tour, scored = _nn_2opt_tour(stops, instance)
+    # Unload time is the same for every order of the same stops, so measure the
+    # starting NN tour once and reuse its unload minutes for 2-opt's span test.
+    start = _nearest_neighbor(stops, instance.depot_index, instance)
+    m0 = route_metrics(start, orders_on_route, instance, vehicle)
+    tour, scored = _nn_2opt_tour(stops, instance, m0.unload_min)
+    if tour == start:                         # 2-opt found nothing better: m0 already measures it
+        return _result(tour, m0, NN_2OPT, False, 1, scored)
     m = route_metrics(tour, orders_on_route, instance, vehicle)
-    return _result(tour, m, NN_2OPT, False, 1, scored)
+    return _result(tour, m, NN_2OPT, False, 2, scored)
 
 
 # --- reference: exact ------------------------------------------------------------
@@ -254,7 +279,7 @@ def exact_sequence(
     orders_on_route: Sequence[int],
     instance: Instance,
     vehicle: VehicleType,
-    max_exact_stops: int = 8,
+    max_exact_stops: int = 10,
 ) -> SequenceResult:
     """Cheapest feasible order by trying every order (proven result).
 
@@ -348,7 +373,7 @@ def best_sequence(
     instance: Instance,
     vehicle: VehicleType,
     method: str,
-    max_exact_stops: int = 8,
+    max_exact_stops: int = 10,
 ) -> SequenceResult:
     """Sequence a stop set with an explicitly chosen rung.
 

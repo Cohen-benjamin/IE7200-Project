@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from dispatch.data import load_instance
+from dispatch.ingest.data import load_instance
 
 # Locate data/csv relative to THIS file (tests/test_data.py -> repo root -> data/csv)
 # so the tests work no matter which folder pytest is launched from.

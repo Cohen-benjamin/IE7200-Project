@@ -58,8 +58,8 @@ import dataclasses
 import itertools
 import time
 
-from dispatch.data import Instance
-from dispatch.params import Params, VehicleType
+from dispatch.ingest.data import Instance
+from dispatch.ingest.params import Params, VehicleType
 from dispatch.route import route_metrics
 from dispatch.sequencing import METHODS, best_sequence
 from dispatch.solution import Solution, make_solution
@@ -151,7 +151,7 @@ def solve(
     resequence: bool = False,
     sequencing: str = "nn_2opt",
     split_orders: bool = False,
-    max_exact_stops: int = 8,
+    max_exact_stops: int = 10,
     stats: dict | None = None,
 ) -> Solution:
     """Build a full plan with parallel Clarke-Wright savings.
@@ -162,7 +162,8 @@ def solve(
         vehicle: vehicle type for every route; default the "Van" in params.
         lam: savings shape parameter (>= 0); 1.0 = textbook formula.
         resequence: False = keep the end-to-end order of a merge;
-            True = re-order the merged stop set with `sequencing`.
+            True = re-order the merged stop set with `sequencing`,
+            but keep the plain joined order when it is cheaper.
         sequencing: method used when resequence=True (a key of
             sequencing.METHODS: "nn", "nn_2opt", "exact").
         split_orders: False = nodes are locations (a location's orders always
@@ -277,25 +278,28 @@ def solve(
         merged_orders = orders_of(joined)                    # every order on the merged route
         # Rule 3: the merged route must be feasible on all four limits.
         if resequence:
-            # Exact search refuses big sets: count "too big" as "does not fit".
-            if sequencing == "exact" and len(joined_stops) > max_exact_stops:
+            candidates = []                                  # feasible options for this merge: (miles, tie, nodes)
+            # Option A: the plain end-to-end order that _join produced.
+            m = route_metrics(joined_stops, merged_orders, work, vehicle)
+            if m.feasible:
+                candidates.append((m.miles_total, 0, joined))
+            # Option B: the best legal order of the merged SET of stops, from the sequencing method.
+            # Exact search refuses big sets, so over its cap only option A is left.
+            if not (sequencing == "exact" and len(joined_stops) > max_exact_stops):
+                r = best_sequence(joined_stops, merged_orders, work, vehicle,
+                                  method=sequencing, max_exact_stops=max_exact_stops)
+                if r.sequence is not None:                   # the method found a legal order
+                    # Rebuild the node order to follow the new stop order (nodes at one
+                    # location stay together, in their current relative order).
+                    by_stop: dict[int, list[int]] = {}
+                    for n in joined:
+                        by_stop.setdefault(location_of[n], []).append(n)
+                    candidates.append((r.metrics.miles_total, -1, [n for s in r.sequence for n in by_stop[s]]))
+            if not candidates:                               # neither order is legal: no merge
                 counts["infeasible"] += 1
                 continue
-            # Ask sequencing for the best legal order of the merged SET of stops
-            # (not just the end-to-end order that _join produced).
-            r = best_sequence(joined_stops, merged_orders, work, vehicle,
-                              method=sequencing, max_exact_stops=max_exact_stops)
-            if r.sequence is None:                           # no legal order found
-                counts["infeasible"] += 1
-                continue
-            # Rebuild the node order to follow the new stop order (nodes at one
-            # location stay together, in their current relative order).
-            # Group the merged nodes by location, then lay them out in the new stop order.
-            by_stop: dict[int, list[int]] = {}
-            for n in joined:
-                by_stop.setdefault(location_of[n], []).append(n)
-            new_nodes = [n for s in r.sequence for n in by_stop[s]]
-            new_miles = r.metrics.miles_total
+            # Keep the cheaper option; on equal miles the sequenced one (tie = -1) wins.
+            new_miles, _, new_nodes = min(candidates, key=lambda c: (c[0], c[1]))
         else:
             # Keep the end-to-end order exactly as joined; route.py judges it.
             m = route_metrics(joined_stops, merged_orders, work, vehicle)

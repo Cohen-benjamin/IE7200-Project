@@ -33,7 +33,7 @@ Where nearest neighbour is myopic on this instance
   stops (3, 4, 5, 6, 7, 10); every other partner pushes driving over 660
   min. By the time NN reaches location 14 those partners are usually
   gone, so it drives 402 miles alone. NN never saves a partner for a hard
-  stop. (Measured later: pairing it with its best partner would save only
+  stop. (Pairing it with its best partner would save only
   1-4 miles, so this costs little; Clarke-Wright also leaves it alone. NN's
   larger loss is in how it groups the OTHER 33 stops.)
 - It never looks ahead: it closes a route as soon as the nearest remaining
@@ -46,8 +46,8 @@ from __future__ import annotations
 import dataclasses
 import time
 
-from dispatch.data import Instance
-from dispatch.params import Params, VehicleType
+from dispatch.ingest.data import Instance
+from dispatch.ingest.params import Params, VehicleType
 from dispatch.sequencing import METHODS, best_sequence
 from dispatch.solution import Solution, make_solution
 
@@ -62,7 +62,7 @@ def solve(
     *,
     sequencing: str = "nn",
     split_orders: bool = False,
-    max_exact_stops: int = 8,
+    max_exact_stops: int = 10,
 ) -> Solution:
     """Build a full plan with nearest neighbour.
 

@@ -11,8 +11,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Sequence
 
-from dispatch.data import Instance
-from dispatch.params import VehicleType
+from dispatch.ingest.data import Instance
+from dispatch.ingest.params import VehicleType
 
 
 # frozen=True: a measured route cannot be edited afterwards, so the numbers stay trustworthy.
@@ -107,8 +107,8 @@ def _check_inputs(
     not_visited = order_locs - set(sequence)
     if not_visited:
         raise ValueError(f"orders at locations not in sequence: {sorted(not_visited)}")
-    # A visited location with none of its orders on this route is a wasted trip 
-    # Checks empty stops (almost always a caller bug).
+    # A visited location with none of its orders on this route is a wasted trip
+    # (almost always a caller error).
     empty_stops = set(sequence) - order_locs
     if empty_stops:
         raise ValueError(f"stops with no order on this route: {sorted(empty_stops)}")
